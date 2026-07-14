@@ -1,0 +1,36 @@
+Problem Statement:
+        Design a backend job processing system that accepts a high volume of user requests, 
+        responds quickly without blocking the client, executes jobs reliably in the 
+        background, and continues operating correctly under worker failures and 
+        increased load.
+
+k6 (via Go)  -- test the API with heavy load, to create Virtual users
+        k6 is a open source system, which was written in GO, but it needs typeScript from developers
+        Reason behind k6, extremly creates massive VU, in a low latency time
+        Locust - is a alternative for this, but our goal is to acheive low latency, so i choose
+        k6 over Locus (similar to k6, instead of typeScript, python used here)
+
+FastAPI - asynchornous frame work
+Redis - used as queue to store the jobs, Redis has good data structures, based on DS, it changes
+        to the situation, for our situation this redis is used as LPUSH and BRPOP, left push and Block
+        Right pop..
+        RabbitMQ, celery, Apache Kafka are alternatives for this REDIS, but out problem statement
+        doesn't deal much about the complex tasks, so perfering the redis is actually much better 
+
+ARQ - Async redis Queue as a worker, as this best built in functions, hearbeat, queue aknoweldgement
+        and a lot of stuff, which is excellent for current tech stack and we can acheive low latency here
+
+Retries - this actually plays a crucial role in this system, we have to send a failed task to again 
+        perform again, ARQ can handle this, we are going with atmost 3, to maintain low latency we are not increasing 
+        retires more than 5 times, we are giving chances to task, and we are not leaving it fall inf times
+        to acheive low latency i think we can go <5 retries
+
+PostgreSQL - PostgreSQL acts as the source of truth for job metadata, status, retry count,
+        timestamps, and idempotency keys. Its transactional guarantees help maintain consistent 
+        job state even during failures.
+
+Important questions:
+        Why behind each decision?
+        Expect Follow-ups...
+        Able to go through the Workflow
+        
