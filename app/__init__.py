@@ -1,1 +1,1 @@
-# Empty init file to mark directory as Python package
+# AsyncZ — app package

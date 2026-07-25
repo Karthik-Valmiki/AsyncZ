@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Async | Status</title>
+    <style>
+        body {
+            font-family: verdana, arial, sans-serif;
+            background-color: #e4e4e4;
+            color: #222;
+            margin: 0;
+            padding: 20px;
+            font-size: 13px;
+        }
+
+        .wrapper {
+            max-width: 1000px;
+            margin: 0 auto;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            padding: 20px;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #3b5998;
+            font-size: 20px;
+            margin-top: 0;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }
+
+        .stats-box {
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-left: 3px solid #3b5998;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .stats-item {
+            text-align: center;
+        }
+
+        .stats-label {
+            font-weight: bold;
+            color: #555;
+            margin-bottom: 5px;
+            font-size: 12px;
+        }
+
+        .stats-value {
+            font-size: 16px;
+            color: #000;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        th,
+        td {
+            border: 1px solid #ccc;
+            padding: 6px 10px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #e8e8e8;
+            color: #333;
+            font-weight: bold;
+        }
+
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+
+        tr:hover {
+            background-color: #eef4fc;
+        }
+
+        .status-completed {
+            color: green;
+            font-weight: bold;
+        }
+
+        .status-failed {
+            color: red;
+            font-weight: bold;
+        }
+
+        .status-processing {
+            color: blue;
+            font-weight: bold;
+        }
+
+        .status-queued {
+            color: #888;
+            font-style: italic;
+        }
+
+        .code {
+            font-family: "Courier New", Courier, monospace;
+            background: #f4f4f4;
+            padding: 2px 4px;
+            border: 1px solid #e0e0e0;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrapper">
+        <h1>AsyncZ Job Execution Status</h1>
+
+        <div class="stats-box">
+            <div class="stats-item">
+                <div class="stats-label">Total Submitted</div>
+                <div class="stats-value" id="stat-total">0</div>
+            </div>
+            <div class="stats-item">
+                <div class="stats-label">Completed</div>
+                <div class="stats-value" id="stat-completed" style="color: green;">0</div>
+            </div>
+            <div class="stats-item">
+                <div class="stats-label">Failed</div>
+                <div class="stats-value" id="stat-failed" style="color: red;">0</div>
+            </div>
+            <div class="stats-item">
+                <div class="stats-label">Success Rate</div>
+                <div class="stats-value" id="stat-rate">0.00%</div>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th width="10%">Job ID</th>
+                    <th width="15%">Time Submitted</th>
+                    <th width="30%">Payload</th>
+                    <th width="15%">Worker</th>
+                    <th width="10%">Status</th>
+                    <th width="10%">Time (s)</th>
+                    <th width="10%">Error</th>
+                </tr>
+            </thead>
+            <tbody id="jobsTableBody">
+                <tr>
+                    <td colspan="7" style="text-align: center;">Loading data...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const API_URL = '';
+
+        function formatDate(dateString) {
+            if (!dateString) return '-';
+            const d = new Date(dateString + 'Z');
+            return d.toISOString().replace('T', ' ').substring(0, 19);
+        }
+
+        function calculateDuration(start, end) {
+            if (!start || !end) return '-';
+            const startTime = new Date(start + 'Z').getTime();
+            const endTime = new Date(end + 'Z').getTime();
+            return ((endTime - startTime) / 1000).toFixed(3);
+        }
+
+        async function fetchJobs() {
+            try {
+                const response = await fetch(`${API_URL}/api/jobs`);
+                const jobs = await response.json();
+
+                // Update Table
+                const tbody = document.getElementById('jobsTableBody');
+                if (jobs.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center;">No jobs found</td></tr>`;
+                } else {
+                    tbody.innerHTML = jobs.map(job => {
+                        let statusClass = `status-${job.status.toLowerCase()}`;
+                        return `
+                            <tr>
+                                <td class="code">${job.job_id.substring(0, 8)}</td>
+                                <td>${formatDate(job.created_at)}</td>
+                                <td class="code">${JSON.stringify(job.payload)}</td>
+                                <td>${job.worker_id || '-'}</td>
+                                <td class="${statusClass}">${job.status.toUpperCase()}</td>
+                                <td>${calculateDuration(job.started_at, job.completed_at)}</td>
+                                <td>${job.last_error ? 'Yes' : 'No'}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
+
+                // Calculate metrics based on the visible dataset (last 50 jobs)
+                // If you want exact global metrics, you'd need an endpoint for it, 
+                // but this gives a live view of the current batch of tests.
+                const total = jobs.length;
+                const completed = jobs.filter(j => j.status === 'completed').length;
+                const failed = jobs.filter(j => j.status === 'failed').length;
+
+                let successRate = 0;
+                const finished = completed + failed;
+                if (finished > 0) {
+                    successRate = (completed / finished) * 100;
+                }
+
+                document.getElementById('stat-total').innerText = total;
+                document.getElementById('stat-completed').innerText = completed;
+                document.getElementById('stat-failed').innerText = failed;
+                document.getElementById('stat-rate').innerText = successRate.toFixed(2) + '%';
+
+            } catch (error) {
+                console.error("Error fetching jobs", error);
+            }
+        }
+
+        // Poll every 2 seconds
+        setInterval(fetchJobs, 2000);
+        fetchJobs();
+    </script>
+</body>
+
+</html>
