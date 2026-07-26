@@ -1,0 +1,50 @@
+Client
+   │
+POST /jobs
+   │
+   ▼
+FastAPI
+   │
+Insert Job (QUEUED)
+   │
+LPUSH(job_id)
+   │
+Return 202 + job_id
+────────────────────────────
+Worker
+   │
+BRPOP(job_id)
+   │
+Fetch Job
+   │
+PROCESSING
+   │
+Execute
+   │
+SUCCESS / FAILED
+
+
+Phase - 2:
+Retry mechanism
+Idempotency
+Heartbeats
+Zombie worker recovery
+Dead Letter Queue
+Graceful shutdown
+Worker acknowledgements
+Multiple workers
+Better logging
+Configuration management
+
+
+Phase - 3:
+k6 load tests
+1 worker vs 5 workers comparison
+Throughput measurements
+Average and P95 processing latency
+Retry statistics
+Simulated worker crash
+Simulated Redis outage (if feasible)
+Architecture diagram
+Sequence diagram
+README explaining design decisions
