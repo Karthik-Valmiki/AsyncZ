@@ -26,7 +26,6 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 
-from arq import cron
 from arq.connections import RedisSettings
 from dotenv import load_dotenv
 from sqlalchemy import select, update

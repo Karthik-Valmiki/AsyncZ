@@ -37,12 +37,13 @@ class Base(DeclarativeBase):
     pass
 
 
-# FastAPI dependency — yields an async DB session per request
+# FastAPI dependency — yields an async DB session per request.
+# Commit is NOT called here — the endpoint owns the commit so it can
+# control exactly when the DB write is finalised before the Redis push.
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise
