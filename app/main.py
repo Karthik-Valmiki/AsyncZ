@@ -12,20 +12,26 @@ Designed to handle k6 virtual-user concurrency:
     - Redis pool: 50 connections               (see redis_client.py)
 """
 
+import sys
+import asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import uuid
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+from asyncpg import UniqueViolationError
 from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text, select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models import Job
-from app.redis_client import enqueue_job, ping_redis
+from app.redis_client import enqueue_job, ping_redis, init_arq_redis, close_arq_redis
 from app.schemas import (
     JobCreateRequest,
     JobCreateResponse,
@@ -48,8 +54,10 @@ logger = logging.getLogger("asyncz.api")
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_arq_redis()
     logger.info("AsyncZ API starting up…")
     yield
+    await close_arq_redis()
     logger.info("AsyncZ API shutting down…")
 
 
@@ -57,18 +65,11 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="AsyncZ",
-    description="High-performance async job queue — Phase 1",
+    title="Asynchrounous Job scheduling",
+    description="Version - 1",
     version="1.0.0",
     lifespan=lifespan,
 )
-
-# Mount frontend directory for static assets
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
-
-@app.get("/", summary="Serve Frontend Dashboard")
-async def serve_frontend():
-    return FileResponse("frontend/index.html")
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,22 @@ async def create_job(
 
     Returns 202 immediately — the client does NOT wait for execution.
     """
+    # --- Idempotency check ---
+    # If the client supplied a key we've already seen, return the existing job.
+    if body.idempotency_key is not None:
+        existing = await db.scalar(
+            select(Job).where(Job.idempotency_key == body.idempotency_key)
+        )
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "duplicate_idempotency_key",
+                    "job_id": str(existing.id),
+                    "status": existing.status,
+                },
+            )
+
     job_id = uuid.uuid4()
     now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC for PG
 
@@ -105,15 +122,23 @@ async def create_job(
     )
 
     db.add(job)
-    await db.flush()  # write to DB inside the open transaction
 
-    # Push to Redis AFTER the DB row is flushed (atomicity: if Redis fails,
-    # the transaction rolls back and no orphan row is left).
-    queue_len = await enqueue_job(str(job_id))
+    try:
+        # Commit first — DB row is permanent before Redis is touched.
+        # If Redis fails after this, the row stays as QUEUED and can be
+        # re-enqueued by a recovery poller (Phase 2). The old order
+        # (flush → LPUSH → commit) risked a ghost Redis entry with no DB row.
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "duplicate_idempotency_key"},
+        )
 
-    await db.commit()
+    await enqueue_job(str(job_id))
 
-    logger.info("Job %s queued (Redis queue depth: %d)", job_id, queue_len)
+    logger.info("Job %s queued", job_id)
 
     return JobCreateResponse(job_id=job_id, status="queued")
 
@@ -155,41 +180,6 @@ async def get_job(
         last_error=job.last_error,
         worker_id=job.worker_id,
     )
-
-
-# ---------------------------------------------------------------------------
-# GET /api/jobs
-# ---------------------------------------------------------------------------
-@app.get(
-    "/api/jobs",
-    response_model=list[JobStatusResponse],
-    summary="List recent jobs",
-)
-async def list_jobs(db: AsyncSession = Depends(get_db)):
-    """
-    Returns the 50 most recent jobs for the frontend dashboard.
-    """
-    result = await db.execute(
-        select(Job).order_by(Job.created_at.desc()).limit(50)
-    )
-    jobs = result.scalars().all()
-    
-    return [
-        JobStatusResponse(
-            job_id=job.id,
-            status=job.status,
-            payload=job.payload,
-            retry_count=job.retry_count,
-            max_retries=job.max_retries,
-            created_at=job.created_at,
-            updated_at=job.updated_at,
-            started_at=job.started_at,
-            completed_at=job.completed_at,
-            last_error=job.last_error,
-            worker_id=job.worker_id,
-        )
-        for job in jobs
-    ]
 
 
 # ---------------------------------------------------------------------------

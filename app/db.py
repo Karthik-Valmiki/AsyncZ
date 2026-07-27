@@ -17,11 +17,11 @@ DATABASE_URL: str = os.getenv(
 
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=20,  # base connections always open
-    max_overflow=40,  # extra burst connections allowed
-    pool_timeout=30,  # seconds to wait for a connection before raising
-    pool_recycle=1800,  # recycle stale connections every 30 min
-    echo=False,  # set True for SQL debug logs
+    pool_size=50,       # raised from 20 — handles 500 VU burst
+    max_overflow=50,    # raised from 40 — total cap: 100 connections
+    pool_timeout=10,    # lowered from 30 — fail fast instead of long waits
+    pool_recycle=1800,
+    echo=False,
 )
 
 # Session factory
@@ -37,12 +37,13 @@ class Base(DeclarativeBase):
     pass
 
 
-# FastAPI dependency — yields an async DB session per request
+# FastAPI dependency — yields an async DB session per request.
+# Commit is NOT called here — the endpoint owns the commit so it can
+# control exactly when the DB write is finalised before the Redis push.
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise
