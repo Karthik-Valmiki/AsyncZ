@@ -7,6 +7,7 @@ The API enqueues via arq_redis.enqueue_job(); the worker dequeues via ARQ intern
 
 import os
 from dotenv import load_dotenv
+from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 
 load_dotenv()
@@ -23,7 +24,7 @@ arq_redis: ArqRedis | None = None
 async def init_arq_redis() -> None:
     """Call once at app startup to create the shared ArqRedis pool."""
     global arq_redis
-    arq_redis = await ArqRedis.create(_redis_settings)
+    arq_redis = await create_pool(_redis_settings)
 
 
 async def close_arq_redis() -> None:

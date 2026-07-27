@@ -12,6 +12,12 @@ Designed to handle k6 virtual-user concurrency:
     - Redis pool: 50 connections               (see redis_client.py)
 """
 
+import sys
+import asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import uuid
 import logging
 from contextlib import asynccontextmanager
@@ -32,8 +38,6 @@ from app.schemas import (
     JobStatusResponse,
     HealthResponse,
 )
-
-
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -61,13 +65,11 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="AsyncZ",
-    description="High-performance async job queue — Phase 1",
+    title="Asynchrounous Job scheduling",
+    description="Version - 1",
     version="1.0.0",
     lifespan=lifespan,
 )
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +182,6 @@ async def get_job(
     )
 
 
-
-
 # ---------------------------------------------------------------------------
 # GET /health
 # ---------------------------------------------------------------------------
@@ -210,6 +210,3 @@ async def health_check(db: AsyncSession = Depends(get_db)) -> HealthResponse:
     overall = "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
 
     return HealthResponse(status=overall, db=db_status, redis=redis_status)
-
-
-
