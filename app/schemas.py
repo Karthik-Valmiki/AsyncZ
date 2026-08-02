@@ -4,7 +4,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+# ---------------------------------------------------------------------------
 # Request
+# ---------------------------------------------------------------------------
 
 
 class JobCreateRequest(BaseModel):
@@ -24,11 +26,15 @@ class JobCreateRequest(BaseModel):
         default=3,
         ge=0,
         le=5,
-        description="Maximum retry attempts (0–5). Kept ≤5 to preserve low latency.",
+        description="Maximum retry attempts (0–5).",
     )
 
 
+# ---------------------------------------------------------------------------
 # Responses
+# ---------------------------------------------------------------------------
+
+
 class JobCreateResponse(BaseModel):
     """Returned immediately after a job is accepted (HTTP 202)."""
 
@@ -50,6 +56,7 @@ class JobStatusResponse(BaseModel):
     completed_at: datetime | None
     last_error: str | None
     worker_id: str | None
+    heartbeat_at: datetime | None  # updated every 10s while processing
 
     model_config = {"from_attributes": True}
 
@@ -58,3 +65,21 @@ class HealthResponse(BaseModel):
     status: str
     db: str
     redis: str
+    dlq_length: int  # number of jobs currently in the dead letter queue
+
+
+class DLQJobEntry(BaseModel):
+    """Single dead-letter-queue entry."""
+
+    job_id: str
+    payload: dict[str, Any]
+    retry_count: int
+    last_error: str | None
+    failed_at: str
+
+
+class DLQResponse(BaseModel):
+    """Response for GET /dlq."""
+
+    count: int
+    jobs: list[DLQJobEntry]

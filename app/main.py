@@ -1,15 +1,11 @@
 """
-main.py — FastAPI application for AsyncZ Phase 1.
+main.py — FastAPI application for AsyncZ Phase 2.
 
 Endpoints:
-    POST /jobs          → Accept job, insert as QUEUED, push to Redis, 202
-    GET  /jobs/{job_id} → Return current job status from DB
-    GET  /health        → Verify DB + Redis connectivity
-
-Designed to handle k6 virtual-user concurrency:
-    - All I/O is async (asyncpg + redis.asyncio)
-    - DB session pool: 20 base + 40 overflow  (see db.py)
-    - Redis pool: 50 connections               (see redis_client.py)
+    POST /jobs          → Accept job, insert as QUEUED, push to ARQ, 202
+    GET  /jobs/{job_id} → Return current job status from DB (+ heartbeat_at)
+    GET  /dlq           → Inspect Dead Letter Queue contents from Redis
+    GET  /health        → Verify DB + Redis + DLQ length
 """
 
 import sys
@@ -18,25 +14,33 @@ import asyncio
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+import json
 import uuid
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from asyncpg import UniqueViolationError
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_db
+from app.db import get_db, engine, Base
 from app.models import Job
-from app.redis_client import enqueue_job, ping_redis, init_arq_redis, close_arq_redis
+from app.redis_client import (
+    enqueue_job,
+    ping_redis,
+    init_arq_redis,
+    close_arq_redis,
+    arq_redis,
+)
 from app.schemas import (
     JobCreateRequest,
     JobCreateResponse,
     JobStatusResponse,
     HealthResponse,
+    DLQResponse,
+    DLQJobEntry,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,14 +52,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("asyncz.api")
 
+DLQ_KEY = "asyncz:dlq"
+
 
 # ---------------------------------------------------------------------------
 # Application lifecycle
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     await init_arq_redis()
-    logger.info("AsyncZ API starting up…")
+    logger.info("AsyncZ API starting up… (Phase 2)")
     yield
     await close_arq_redis()
     logger.info("AsyncZ API shutting down…")
@@ -65,9 +73,9 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="Asynchrounous Job scheduling",
-    description="Version - 1",
-    version="1.0.0",
+    title="AsyncZ — Asynchronous Job Queue",
+    description="Fault-Tolerant System",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -87,12 +95,14 @@ async def create_job(
 ) -> JobCreateResponse:
     """
     Accepts a job payload, writes it to PostgreSQL as QUEUED,
-    then pushes the job_id onto the Redis queue so a worker can pick it up.
+    then pushes the job_id onto the ARQ queue so a worker can pick it up.
 
-    Returns 202 immediately — the client does NOT wait for execution.
+    Returns 202 immediately.
+
+    If idempotency_key is supplied and already exists, returns 409 with the
+    existing job_id so the client can poll that instead.
     """
-    # --- Idempotency check ---
-    # If the client supplied a key we've already seen, return the existing job.
+    # --- Idempotency pre-check ---
     if body.idempotency_key is not None:
         existing = await db.scalar(
             select(Job).where(Job.idempotency_key == body.idempotency_key)
@@ -108,7 +118,7 @@ async def create_job(
             )
 
     job_id = uuid.uuid4()
-    now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC for PG
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     job = Job(
         id=job_id,
@@ -124,20 +134,24 @@ async def create_job(
     db.add(job)
 
     try:
-        # Commit first — DB row is permanent before Redis is touched.
-        # If Redis fails after this, the row stays as QUEUED and can be
-        # re-enqueued by a recovery poller (Phase 2). The old order
-        # (flush → LPUSH → commit) risked a ghost Redis entry with no DB row.
         await db.commit()
     except IntegrityError:
         await db.rollback()
+        # Race condition: two concurrent requests with the same key.
+        # The unique constraint fired — find and return the winner's job_id.
+        existing = await db.scalar(
+            select(Job).where(Job.idempotency_key == body.idempotency_key)
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"error": "duplicate_idempotency_key"},
+            detail={
+                "error": "duplicate_idempotency_key",
+                "job_id": str(existing.id) if existing else None,
+                "status": existing.status if existing else None,
+            },
         )
 
     await enqueue_job(str(job_id))
-
     logger.info("Job %s queued", job_id)
 
     return JobCreateResponse(job_id=job_id, status="queued")
@@ -157,7 +171,10 @@ async def get_job(
 ) -> JobStatusResponse:
     """
     Returns the latest state of a job directly from PostgreSQL.
-    Poll this endpoint to track job progress.
+
+    Phase 2 additions in response:
+        - heartbeat_at: last time the worker proved it was alive
+        - status can now be "dead" (exhausted all retries → moved to DLQ)
     """
     job = await db.get(Job, job_id)
 
@@ -179,7 +196,46 @@ async def get_job(
         completed_at=job.completed_at,
         last_error=job.last_error,
         worker_id=job.worker_id,
+        heartbeat_at=job.heartbeat_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /dlq
+# ---------------------------------------------------------------------------
+@app.get(
+    "/dlq",
+    response_model=DLQResponse,
+    summary="Inspect the Dead Letter Queue",
+)
+async def get_dlq() -> DLQResponse:
+    """
+    Returns the current contents of the Dead Letter Queue from Redis.
+
+    Jobs end up here when they have exhausted all retry attempts.
+    This endpoint lets you inspect them without needing Redis CLI.
+
+    The DLQ is capped at 1,000 entries (oldest are evicted first).
+    """
+    raw_entries: list[bytes] = await arq_redis.lrange(DLQ_KEY, 0, -1)
+
+    jobs: list[DLQJobEntry] = []
+    for raw in raw_entries:
+        try:
+            data = json.loads(raw)
+            jobs.append(
+                DLQJobEntry(
+                    job_id=data["job_id"],
+                    payload=data["payload"],
+                    retry_count=data["retry_count"],
+                    last_error=data.get("last_error"),
+                    failed_at=data["failed_at"],
+                )
+            )
+        except Exception:
+            continue  # skip malformed entries
+
+    return DLQResponse(count=len(jobs), jobs=jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +249,7 @@ async def get_job(
 async def health_check(db: AsyncSession = Depends(get_db)) -> HealthResponse:
     """
     Verifies that both PostgreSQL and Redis are reachable.
-    Used by k6 scripts and monitoring to gate load tests.
+    Phase 2: also reports the current DLQ length so you can alert on it.
     """
     # DB check
     try:
@@ -207,6 +263,17 @@ async def health_check(db: AsyncSession = Depends(get_db)) -> HealthResponse:
     redis_ok = await ping_redis()
     redis_status = "ok" if redis_ok else "error"
 
+    # DLQ length
+    try:
+        dlq_length = await arq_redis.llen(DLQ_KEY)
+    except Exception:
+        dlq_length = -1
+
     overall = "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
 
-    return HealthResponse(status=overall, db=db_status, redis=redis_status)
+    return HealthResponse(
+        status=overall,
+        db=db_status,
+        redis=redis_status,
+        dlq_length=dlq_length,
+    )
