@@ -1,11 +1,11 @@
 """
-main.py — FastAPI application for AsyncZ Phase 2.
+main.py — FastAPI application entry point.
 
 Endpoints:
-    POST /jobs          → Accept job, insert as QUEUED, push to ARQ, 202
-    GET  /jobs/{job_id} → Return current job status from DB (+ heartbeat_at)
+    POST /jobs          → Accept job, insert as QUEUED, push to ARQ, return 202
+    GET  /jobs/{job_id} → Return current job status from PostgreSQL
     GET  /dlq           → Inspect Dead Letter Queue contents from Redis
-    GET  /health        → Verify DB + Redis + DLQ length
+    GET  /health        → Verify DB + Redis connectivity and DLQ depth
 """
 
 import sys
@@ -27,13 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db, engine, Base
 from app.models import Job
-from app.redis_client import (
-    enqueue_job,
-    ping_redis,
-    init_arq_redis,
-    close_arq_redis,
-    arq_redis,
-)
+from app.redis_client import enqueue_job, ping_redis, init_arq_redis, close_arq_redis, arq_redis
 from app.schemas import (
     JobCreateRequest,
     JobCreateResponse,
@@ -43,9 +37,6 @@ from app.schemas import (
     DLQJobEntry,
 )
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -55,34 +46,25 @@ logger = logging.getLogger("asyncz.api")
 DLQ_KEY = "asyncz:dlq"
 
 
-# ---------------------------------------------------------------------------
-# Application lifecycle
-# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await init_arq_redis()
-    logger.info("AsyncZ API starting up… (Phase 2)")
+    logger.info("AsyncZ API started.")
     yield
     await close_arq_redis()
-    logger.info("AsyncZ API shutting down…")
+    logger.info("AsyncZ API shut down.")
 
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
 app = FastAPI(
     title="AsyncZ — Asynchronous Job Queue",
-    description="Fault-Tolerant System",
-    version="2.0.0",
+    description="High-throughput async job scheduler with retries, DLQ, and zombie recovery.",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
 
-# ---------------------------------------------------------------------------
-# POST /jobs
-# ---------------------------------------------------------------------------
 @app.post(
     "/jobs",
     status_code=status.HTTP_202_ACCEPTED,
@@ -94,15 +76,12 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ) -> JobCreateResponse:
     """
-    Accepts a job payload, writes it to PostgreSQL as QUEUED,
-    then pushes the job_id onto the ARQ queue so a worker can pick it up.
+    Writes the job to PostgreSQL as QUEUED, then pushes the job_id to the ARQ
+    queue. Returns 202 immediately — the client does not wait for execution.
 
-    Returns 202 immediately.
-
-    If idempotency_key is supplied and already exists, returns 409 with the
-    existing job_id so the client can poll that instead.
+    If an idempotency_key is supplied and already exists, returns 409 with the
+    original job_id so the client can poll that instead of resubmitting.
     """
-    # --- Idempotency pre-check ---
     if body.idempotency_key is not None:
         existing = await db.scalar(
             select(Job).where(Job.idempotency_key == body.idempotency_key)
@@ -130,15 +109,14 @@ async def create_job(
         updated_at=now,
         idempotency_key=body.idempotency_key,
     )
-
     db.add(job)
 
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        # Race condition: two concurrent requests with the same key.
-        # The unique constraint fired — find and return the winner's job_id.
+        # Race condition: two concurrent requests with the same key both passed
+        # the pre-check. The unique constraint caught the second one.
         existing = await db.scalar(
             select(Job).where(Job.idempotency_key == body.idempotency_key)
         )
@@ -152,14 +130,10 @@ async def create_job(
         )
 
     await enqueue_job(str(job_id))
-    logger.info("Job %s queued", job_id)
-
+    logger.info("Job %s queued.", job_id)
     return JobCreateResponse(job_id=job_id, status="queued")
 
 
-# ---------------------------------------------------------------------------
-# GET /jobs/{job_id}
-# ---------------------------------------------------------------------------
 @app.get(
     "/jobs/{job_id}",
     response_model=JobStatusResponse,
@@ -170,14 +144,12 @@ async def get_job(
     db: AsyncSession = Depends(get_db),
 ) -> JobStatusResponse:
     """
-    Returns the latest state of a job directly from PostgreSQL.
+    Returns the current state of a job from PostgreSQL.
+    Poll this endpoint to track job progress.
 
-    Phase 2 additions in response:
-        - heartbeat_at: last time the worker proved it was alive
-        - status can now be "dead" (exhausted all retries → moved to DLQ)
+    Possible status values: queued | processing | completed | dead
     """
     job = await db.get(Job, job_id)
-
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -200,9 +172,6 @@ async def get_job(
     )
 
 
-# ---------------------------------------------------------------------------
-# GET /dlq
-# ---------------------------------------------------------------------------
 @app.get(
     "/dlq",
     response_model=DLQResponse,
@@ -210,12 +179,8 @@ async def get_job(
 )
 async def get_dlq() -> DLQResponse:
     """
-    Returns the current contents of the Dead Letter Queue from Redis.
-
-    Jobs end up here when they have exhausted all retry attempts.
-    This endpoint lets you inspect them without needing Redis CLI.
-
-    The DLQ is capped at 1,000 entries (oldest are evicted first).
+    Returns jobs that permanently failed after exhausting all retries.
+    The DLQ is stored in Redis and capped at 1,000 entries.
     """
     raw_entries: list[bytes] = await arq_redis.lrange(DLQ_KEY, 0, -1)
 
@@ -233,14 +198,11 @@ async def get_dlq() -> DLQResponse:
                 )
             )
         except Exception:
-            continue  # skip malformed entries
+            continue
 
     return DLQResponse(count=len(jobs), jobs=jobs)
 
 
-# ---------------------------------------------------------------------------
-# GET /health
-# ---------------------------------------------------------------------------
 @app.get(
     "/health",
     response_model=HealthResponse,
@@ -248,10 +210,9 @@ async def get_dlq() -> DLQResponse:
 )
 async def health_check(db: AsyncSession = Depends(get_db)) -> HealthResponse:
     """
-    Verifies that both PostgreSQL and Redis are reachable.
-    Phase 2: also reports the current DLQ length so you can alert on it.
+    Verifies PostgreSQL and Redis connectivity.
+    Returns DLQ depth — if this is growing, job execution is broken.
     """
-    # DB check
     try:
         await db.execute(text("SELECT 1"))
         db_status = "ok"
@@ -259,11 +220,9 @@ async def health_check(db: AsyncSession = Depends(get_db)) -> HealthResponse:
         logger.error("DB health check failed: %s", exc)
         db_status = "error"
 
-    # Redis check
     redis_ok = await ping_redis()
     redis_status = "ok" if redis_ok else "error"
 
-    # DLQ length
     try:
         dlq_length = await arq_redis.llen(DLQ_KEY)
     except Exception:

@@ -1,7 +1,7 @@
 services:
   db:
     image: postgres:15
-    command: ["postgres", "-c", "max_connections=1000"]  # to increase max_connections
+    command: [ "postgres", "-c", "max_connections=500" ]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password123
@@ -9,7 +9,7 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -19,7 +19,7 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -31,6 +31,8 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:password123@db:5432/asyncz
       - REDIS_URL=redis://redis:6379
+      - DB_POOL_SIZE=200
+      - DB_MAX_OVERFLOW=200
     depends_on:
       db:
         condition: service_healthy
@@ -39,10 +41,12 @@ services:
 
   worker:
     build: .
-    command: ["python", "-m", "arq", "app.worker.WorkerSettings"]
+    command: [ "python", "-m", "arq", "app.worker.WorkerSettings" ]
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:password123@db:5432/asyncz
       - REDIS_URL=redis://redis:6379
+      - DB_POOL_SIZE=15
+      - DB_MAX_OVERFLOW=10
     depends_on:
       db:
         condition: service_healthy

@@ -1,46 +1,45 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check, sleep } from 'k6';/// Run command (inside Docker):
 
-// 1. Configuration — 5 jobs/sec per user (sleep 0.2s), 10 VUs = 50 jobs/sec total
-// On Windows, keep VUs ≤ 10 to avoid the 512 socket limit crash.
-// On Linux/WSL2 you can safely push to 100+ VUs.
-//docker-compose run --rm k6 run /tests/load_test.js
+//   docker-compose run --rm k6 run /tests/load_test.js
 
 export const options = {
-    vus: 5000,          // 10 concurrent users
-    duration: '20s',  // Run long enough to see queue backlog
+    scenarios: {
+        submit_jobs: {
+            executor: "constant-arrival-rate",
+            rate: 1500,
+            timeUnit: "1s",
+            duration: "30s",
+            preAllocatedVUs: 500,
+            maxVUs: 5000,
+        },
+    },
+    thresholds: {
+        http_req_failed: ['rate<0.01'], // less than 1% failure
+        http_req_duration: ['p(95)<500'], // 95% of requests must complete within 500ms
+    },
 };
 
-// 2. The Loop
+const JOB_TYPES = ['email_send', 'pdf_generate', 'image_resize', 'data_export', 'report_build'];
+
 export default function () {
-    // const url = 'http://localhost:8000/jobs'; # for windows
-    // const url = 'http://host.docker.internal:8000/jobs';   // for docker
     const url = 'http://api:8000/jobs';
 
-
-    // The exact format your schemas.py expects
     const payload = JSON.stringify({
         payload: {
-            task: "mass_stress_test",
-            user_id: Math.floor(Math.random() * 1000000)
+            task: JOB_TYPES[Math.floor(Math.random() * JOB_TYPES.length)],
+            user_id: Math.floor(Math.random() * 100000),
+            priority: Math.random() > 0.8 ? 'high' : 'normal',
         }
     });
 
     const params = {
-        headers: {
-            'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
     };
 
-    // 3. Send the request
     const res = http.post(url, payload, params);
 
-    // 4. Validate the response
     check(res, {
         'is status 202': (r) => r.status === 202,
     });
-
-    // sleep(0.2) = 5 jobs per second per user max
-    // 10 VUs × 5 jobs/sec = 50 total jobs/sec hitting the API
-    sleep(0.2);
 }
