@@ -6,6 +6,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0%20async-D71F00?style=for-the-badge&logo=sqlalchemy&logoColor=white)
+![k6](https://img.shields.io/badge/k6-Load%20Testing-7D64FF?style=for-the-badge&logo=k6&logoColor=white)
 
 AsyncZ is a durable, horizontally scalable background job queue built on FastAPI, Redis, and PostgreSQL. It accepts job submissions over HTTP and processes them asynchronously — the client gets a 202 immediately and polls for results. It exists to solve the specific problem of tasks that are too slow to run in a request/response cycle (LLM calls, report generation, file processing) but must not be silently dropped if a process dies mid-execution.
 
