@@ -115,6 +115,8 @@ docker compose run --rm k6 run /tests/load_test.js
 Script: `tests/load_test.js` — `constant-arrival-rate` executor, 1,500 req/s target, 30s duration, up to 5,000 VUs.
 
 **Results on a developer machine (Windows, Docker Desktop, WSL2):**
+![Uploading Screenshot 2026-08-04 002753.png…]()
+
 
 ```
 checks_succeeded:  100.00%   7364 out of 7364
