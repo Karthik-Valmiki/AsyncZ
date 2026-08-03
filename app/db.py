@@ -15,11 +15,15 @@ DATABASE_URL: str = os.getenv(
     "postgresql+asyncpg://postgres:first123@localhost:5432/asyncT",
 )
 
+# Pure SQLAlchemy defaults for connection pools
+pool_size = int(os.getenv("DB_POOL_SIZE", "20"))
+max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=50,       # raised from 20 — handles 500 VU burst
-    max_overflow=50,    # raised from 40 — total cap: 100 connections
-    pool_timeout=10,    # lowered from 30 — fail fast instead of long waits
+    pool_size=pool_size,
+    max_overflow=max_overflow,
+    pool_timeout=30,
     pool_recycle=1800,
     echo=False,
 )

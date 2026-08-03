@@ -32,7 +32,7 @@ class Job(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
 
-    # Lifecycle status: queued | processing | completed | failed
+    # Lifecycle status: queued | processing | completed | dead
     status: Mapped[str] = mapped_column(String(20), nullable=False)
 
     # Arbitrary JSON payload sent by the client
@@ -58,7 +58,7 @@ class Job(Base):
     # Worker that owns this job right now
     worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
-    # Phase 2: heartbeat + idempotency (columns exist in DB, used from Phase 2)
+    # Heartbeat + idempotency
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     idempotency_key: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True, unique=True

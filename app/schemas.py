@@ -56,7 +56,7 @@ class JobStatusResponse(BaseModel):
     completed_at: datetime | None
     last_error: str | None
     worker_id: str | None
-    heartbeat_at: datetime | None  # updated every 10s while processing
+    heartbeat_at: datetime | None  # last heartbeat written by the worker
 
     model_config = {"from_attributes": True}
 
@@ -65,7 +65,7 @@ class HealthResponse(BaseModel):
     status: str
     db: str
     redis: str
-    dlq_length: int  # number of jobs currently in the dead letter queue
+    dlq_length: int
 
 
 class DLQJobEntry(BaseModel):
