@@ -1,5 +1,12 @@
 # AsyncZ
 
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-ARQ%20Queue-DC382D?style=for-the-badge&logo=redis&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0%20async-D71F00?style=for-the-badge&logo=sqlalchemy&logoColor=white)
+
 AsyncZ is a durable, horizontally scalable background job queue built on FastAPI, Redis, and PostgreSQL. It accepts job submissions over HTTP and processes them asynchronously — the client gets a 202 immediately and polls for results. It exists to solve the specific problem of tasks that are too slow to run in a request/response cycle (LLM calls, report generation, file processing) but must not be silently dropped if a process dies mid-execution.
 
 ---
@@ -104,7 +111,7 @@ Run against the live stack (k6 runs inside Docker on the same network as the API
 docker compose run --rm k6 run /tests/load_test.js
 ```
 
-Script: `tests/load_test.js` — `constant-arrival-rate` executor, 1,500 req/s target, 30s duration, up to 5,000 VUs. you can change them, as you want, but make sure to test it after changing, probabily it will breaks on above 5k VU as the windows won't support, so better test on LINUX
+Script: `tests/load_test.js` — `constant-arrival-rate` executor, 1,500 req/s target, 30s duration, up to 5,000 VUs.
 
 **Results on a developer machine (Windows, Docker Desktop, WSL2):**
 
@@ -112,6 +119,8 @@ Script: `tests/load_test.js` — `constant-arrival-rate` executor, 1,500 req/s t
 checks_succeeded:  100.00%   7364 out of 7364
 http_req_failed:     0.00%      0 out of 7364
 http_reqs:           7364      176 req/s sustained
+http_req_duration:    p95=21.36s   (target threshold: p95<500ms — FAILED)
+dropped_iterations:  37607      903/s
 ```
 
 **Post-test database metrics** (run after workers drain the queue):
@@ -131,14 +140,16 @@ SELECT
   PERCENTILE_CONT(0.95) WITHIN GROUP
     (ORDER BY EXTRACT(EPOCH FROM (completed_at - started_at))) AS p95_sec
 FROM jobs WHERE status='completed' AND completed_at IS NOT NULL;
--- avg: 1.570s   p95: 2.48s
+-- avg: 1.570s   p95: 2.487s   (worker processing time, once a job is picked up)
 
 SELECT worker_id, COUNT(*) AS jobs_completed
 FROM jobs WHERE status='completed' GROUP BY worker_id;
--- Near-uniform distribution across 5 workers: ~1458–1487 jobs each
+-- Near-uniform distribution across 5 workers: 1458–1487 jobs each
 ```
 
-> **Note on the p(95) HTTP threshold:** The k6 threshold `p(95)<500ms` fails on Docker Desktop because WSL2 adds 8–15ms of network overhead per hop. On a Linux server or cloud VM the same architecture hits sub-100ms p(95). The 0% HTTP failure rate and 100% DB processing rate are the metrics that demonstrate correctness; the p(95) threshold reflects a hardware constraint, not an architecture one.
+> **Honest read of these numbers:** the system achieved 100% completion with zero retries and near-uniform work distribution across workers — the queue, worker pool, and DB-write path are correct under this load. But throughput is capped at ~176 req/s against a 1,500 req/s target, and `http_req_duration` p95 is 21.36s — meaning `POST /jobs` is not returning "immediately" as designed once load rises. This is a real bottleneck, not a WSL2/network artifact: the latency spread (min 395ms, max 23.5s) is the signature of requests queueing for a limited resource, not a flat network tax. Root cause not yet isolated — leading suspects are DB connection pool size and the single (unscaled) API container. `docker stats` and `pg_stat_activity` checks are the next step before this number should be treated as a ceiling rather than a symptom.
+>
+> Also note: `_execute_payload` currently simulates work with `asyncio.sleep` rather than real task execution, so this test measures queue/DB/retry throughput, not real job-processing throughput under production workloads.
 
 ---
 
@@ -146,12 +157,13 @@ FROM jobs WHERE status='completed' GROUP BY worker_id;
 
 | Component | Choice | Why |
 |---|---|---|
-| **API** | FastAPI + uvicorn (4 workers) | Async-native; 4 uvicorn processes match Docker Desktop's ~4 allocated vCPUs — confirmed 4.4× throughput gain vs. single process in load tests |
-| **Queue** | Redis via ARQ | At-least-once delivery using Redis sorted sets. Redis was already required for ARQ worker coordination; adding a second broker (Rabbit, SQS) was unjustified complexity at this scale |
+| **API** | ![FastAPI](https://img.shields.io/badge/-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white) uvicorn (4 workers) | Async-native; 4 uvicorn processes match Docker Desktop's ~4 allocated vCPUs — confirmed 4.4× throughput gain vs. single process in load tests |
+| **Queue** | ![Redis](https://img.shields.io/badge/-Redis-DC382D?style=flat-square&logo=redis&logoColor=white) via ARQ | At-least-once delivery using Redis sorted sets. Redis was already required for ARQ worker coordination; adding a second broker (Rabbit, SQS) was unjustified complexity at this scale |
 | **Worker** | ARQ worker process | Handles worker lifecycle, Redis pub/sub, and concurrent job slots (`max_jobs=10`). Scales horizontally with `--scale worker=N` |
-| **Persistence** | PostgreSQL 15 + asyncpg | Job state must survive process restarts. PostgreSQL's `UNIQUE` constraint enforces idempotency atomically under concurrent load — an application-layer check cannot guarantee this |
-| **ORM** | SQLAlchemy 2.0 async | `async_sessionmaker` + `asyncpg` driver allows non-blocking DB I/O on the same event loop as the HTTP server — no thread-pool overhead per request |
+| **Persistence** | ![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white) 15 + asyncpg | Job state must survive process restarts. PostgreSQL's `UNIQUE` constraint enforces idempotency atomically under concurrent load — an application-layer check cannot guarantee this |
+| **ORM** | ![SQLAlchemy](https://img.shields.io/badge/-SQLAlchemy-D71F00?style=flat-square&logo=sqlalchemy&logoColor=white) 2.0 async | `async_sessionmaker` + `asyncpg` driver allows non-blocking DB I/O on the same event loop as the HTTP server — no thread-pool overhead per request |
 | **Schema** | SQLAlchemy `create_all` | Acceptable for a self-contained project. Alembic would be added before any schema change in a team environment where multiple engineers touch the DB |
+| **Runtime** | ![Docker](https://img.shields.io/badge/-Docker-2496ED?style=flat-square&logo=docker&logoColor=white) Compose | Entire stack (API, workers, Redis, Postgres) runs identically on any machine with Docker installed — no local dependency setup required |
 
 ---
 
@@ -165,7 +177,7 @@ FROM jobs WHERE status='completed' GROUP BY worker_id;
 
 - **`_execute_payload` is a stub.** The worker simulates work with `asyncio.sleep`. Integrating real business logic (HTTP calls to external APIs, file I/O) will expose failure modes — network timeouts, partial writes — that the current generic retry loop may need to handle per-task-type.
 
-- **Single API container by default.** The `api` service is not scaled in `docker-compose.yml`. HTTP throughput is bounded by one API container. To scale the API horizontally, add `--scale api=N` with an nginx load balancer in front, or deploy to an orchestrator (Kubernetes, ECS) that handles routing.
+- **Single API container by default.** The `api` service is not scaled in `docker-compose.yml`. HTTP throughput is bounded by one API container. Load testing shows this caps sustained throughput well below the queue/worker layer's actual capacity. To scale the API horizontally, add `--scale api=N` with an nginx load balancer in front, or deploy to an orchestrator (Kubernetes, ECS) that handles routing.
 
 ---
 
