@@ -115,15 +115,11 @@ docker compose run --rm k6 run /tests/load_test.js
 Script: `tests/load_test.js` — `constant-arrival-rate` executor, 1,500 req/s target, 30s duration, up to 5,000 VUs.
 
 **Results on a developer machine (Windows, Docker Desktop, WSL2):**
-![Uploading Screenshot 2026-08-04 002753.png…]()
-
-
 ```
-checks_succeeded:  100.00%   7364 out of 7364
-http_req_failed:     0.00%      0 out of 7364
-http_reqs:           7364      176 req/s sustained
-http_req_duration:    p95=21.36s   (target threshold: p95<500ms — FAILED)
-dropped_iterations:  37607      903/s
+checks_succeeded:  100.00%   21131 out of 21131
+http_req_failed:     0.00%      0 out of 21131
+http_reqs:           21131      311 req/s sustained
+http_req_duration:    p95=20.86s   (target threshold: p95<500ms — FAILED, due to max_connection_poolout)
 ```
 
 **Post-test database metrics** (run after workers drain the queue):
@@ -143,11 +139,11 @@ SELECT
   PERCENTILE_CONT(0.95) WITHIN GROUP
     (ORDER BY EXTRACT(EPOCH FROM (completed_at - started_at))) AS p95_sec
 FROM jobs WHERE status='completed' AND completed_at IS NOT NULL;
--- avg: 1.570s   p95: 2.487s   (worker processing time, once a job is picked up)
+-- avg: 1.615s   p95: 2.49s   (worker processing time, once a job is picked up)
 
 SELECT worker_id, COUNT(*) AS jobs_completed
 FROM jobs WHERE status='completed' GROUP BY worker_id;
--- Near-uniform distribution across 5 workers: 1458–1487 jobs each
+-- Near-uniform distribution across 5 workers: 4131–4222 jobs each
 ```
 
 > **Honest read of these numbers:** the system achieved 100% completion with zero retries and near-uniform work distribution across workers — the queue, worker pool, and DB-write path are correct under this load. But throughput is capped at ~176 req/s against a 1,500 req/s target, and `http_req_duration` p95 is 21.36s — meaning `POST /jobs` is not returning "immediately" as designed once load rises. This is a real bottleneck, not a WSL2/network artifact: the latency spread (min 395ms, max 23.5s) is the signature of requests queueing for a limited resource, not a flat network tax. Root cause not yet isolated — leading suspects are DB connection pool size and the single (unscaled) API container. `docker stats` and `pg_stat_activity` checks are the next step before this number should be treated as a ceiling rather than a symptom.
