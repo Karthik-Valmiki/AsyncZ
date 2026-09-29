@@ -21,6 +21,7 @@ The design requirement here was: a job submitted at time T must eventually compl
 ---
 
 ## Architecture
+ <img width="1504" height="730" alt="image" src="https://github.com/user-attachments/assets/36231d82-3bfb-41e6-88fd-487a0bbfba8f" />
 
 ```
 Client
